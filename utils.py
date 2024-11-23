@@ -1,6 +1,7 @@
 import torch
 from timm.models.vision_transformer import Block
 
+
 class MHSA(torch.nn.Module):
     # x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
     # x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
