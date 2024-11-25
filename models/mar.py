@@ -6,8 +6,7 @@ import numpy as np
 from timm.models.vision_transformer import Block
 from scipy import stats
 
-from torchvision.io import read_image
-from torchvision.utils import save_image
+from models.simple_mlp_ada_ln import SimpleMLPAdaLN
 
 
 class MAR(torch.nn.Module):
@@ -26,8 +25,14 @@ class MAR(torch.nn.Module):
         encoder_norm_layer: torch.nn.Module = torch.nn.LayerNorm,
         encoder_proj_dropout: float = 0.0,
         encoder_attn_dropout: float = 0.0,
+        
         decoder_depth: int = 4,
         decoder_embed_dim: int = 128,
+        
+        diffusion_embedding_dim: int = 128,
+        diffusion_output_channels: int = 3,
+        diffusion_num_res_blocks: int = 8,
+        
         label_drop_prob: float = 0.7,
         n_classes: int = 10,
     ):
@@ -95,8 +100,18 @@ class MAR(torch.nn.Module):
         )
         self.decoder_norm = torch.nn.LayerNorm(decoder_embed_dim)
 
+        # diffusion pos embeddings
+
         self.diffusion_pos_embeddings = torch.nn.Parameter(
             torch.zeros(1, self.seq_len, decoder_embed_dim)
+        )
+        
+        self.simple_mlp_ada_ln = SimpleMLPAdaLN(
+            decoder_embed_dim, 
+            diffusion_output_channels,
+            diffusion_output_channels,
+            diffusion_embedding_dim,
+            diffusion_num_res_blocks,
         )
 
     def initialize_weights(self):
@@ -181,9 +196,12 @@ class MAR(torch.nn.Module):
         x = torch.cat(
             [torch.zeros(bsz, self.buffer_size, embed_dim, device=x.device), x], dim=1
         )
+        # image = [buffer | image]
+        
         mask_with_buffer = torch.cat(
             [torch.zeros(x.size(0), self.buffer_size, device=x.device), mask], dim=1
         )
+        # mask = [buffer | mask]
 
         # random drop class embedding during training
         if self.training:
@@ -195,13 +213,15 @@ class MAR(torch.nn.Module):
             )
 
         x[:, : self.buffer_size] = class_embedding.unsqueeze(1)
+        # x = [class_embedding | ...]
 
         # encoder position embedding
-        x = x + self.encoder_pos_embeddings
-        x = self.z_proj_ln(x)
+        x = x + self.encoder_pos_embeddings # position embedding
+        x = self.z_proj_ln(x) # layer_norm
 
         # dropping
-        x = x[(1 - mask_with_buffer).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
+        inverted_mask_indices = (1 - mask_with_buffer).nonzero(as_tuple=True)
+        x = x[inverted_mask_indices].reshape(bsz, -1, embed_dim)
 
         # apply transformer blocks
         for block in self.encoder_blocks:
@@ -215,20 +235,20 @@ class MAR(torch.nn.Module):
         self, x: torch.FloatTensor, mask: torch.BoolTensor
     ) -> torch.FloatTensor:
 
+        # decode masked embeddings 
         x = self.decoder_embed(x)
-        mask_with_buffer = torch.cat(
-            [torch.zeros(x.size(0), self.buffer_size, device=x.device), mask], dim=1
-        )
+        
+        # 
+        mask_with_buffer = torch.cat([torch.zeros(x.size(0), self.buffer_size, device=x.device), mask], dim=1)
 
         # pad mask tokens
-        mask_tokens = self.decoder_mask_token.repeat(
-            mask_with_buffer.shape[0], mask_with_buffer.shape[1], 1
-        ).to(x.dtype)
+        mask_tokens = self.decoder_mask_token.repeat(mask_with_buffer.shape[0], mask_with_buffer.shape[1], 1).to(x.dtype)
 
         x_after_pad = mask_tokens.clone()
-        x_after_pad[(1 - mask_with_buffer).nonzero(as_tuple=True)] = x.reshape(
-            x.shape[0] * x.shape[1], x.shape[2]
-        )
+        
+        inverted_mask_indices = (1 - mask_with_buffer).nonzero(as_tuple=True)
+        
+        x_after_pad[inverted_mask_indices] = x.reshape(x.shape[0] * x.shape[1], x.shape[2])
 
         # decoder position embedding
         x = x_after_pad + self.decoder_pos_embeddings
@@ -248,7 +268,11 @@ class MAR(torch.nn.Module):
     def forward_diffusion(
         self, x: torch.FloatTensor, mask: torch.BoolTensor
     ) -> torch.FloatTensor:
+        
+        
         pass
+        
+        
 
     def forward(
         self, imgs: torch.FloatTensor, labels: torch.LongTensor
@@ -264,27 +288,22 @@ class MAR(torch.nn.Module):
         orders = self.sample_orders(x.size(0))  # (bsz, seq_len)
         mask = self.random_masking(x, orders)  # (bsz, seq_len)
 
+        # forward mae-encoder
         x = self.forward_mae_encoder(x, mask, class_embeddings)
 
+        # pass onto mae-decoder
         z = self.forward_mae_decoder(x, mask)
 
-        loss = self.forward_loss(z=z, target=gt, mask=mask)
+        # pass on to diffusion-process
+        z_pred = self.forward_diffusion(z, mask)
 
         return x
-
-
-model = MAR(h=256, w=256)
-
-indices = (
-    torch.Tensor([[0]])
-    .reshape(
-        1,
-    )
-    .long()
-)
-x = torch.randn(1, 3, 256, 256)
-
-x = model(x, indices)
-
-# save image
-# save_image(x[0], "masked.png")
+    
+if __name__ == "__main__":
+    
+    model = MAR()
+    
+    x = torch.randn(1, 3, 64, 64)
+    labels = torch.randint(0, 10, (1,))
+    
+    pred = model(x, labels)
