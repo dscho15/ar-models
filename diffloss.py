@@ -199,13 +199,15 @@ class SimpleMLPAdaLN(nn.Module):
 
         self.initialize_weights()
 
-    def initialize_weights(self):
-        def _basic_init(module):
+    def _basic_init(module):
             if isinstance(module, nn.Linear):
                 torch.nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
-        self.apply(_basic_init)
+
+    def initialize_weights(self):
+                    
+        self.apply(self._basic_init)
 
         # Initialize timestep embedding MLP
         nn.init.normal_(self.time_embed.mlp[0].weight, std=0.02)
@@ -242,12 +244,19 @@ class SimpleMLPAdaLN(nn.Module):
         return self.final_layer(x, y)
 
     def forward_with_cfg(self, x, t, c, cfg_scale):
+        
         half = x[: len(x) // 2]
+        
         combined = torch.cat([half, half], dim=0)
+        
         model_out = self.forward(combined, t, c)
+        
         eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
+        
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
+        
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        
         eps = torch.cat([half_eps, half_eps], dim=0)
         
         return torch.cat([eps, rest], dim=1)
